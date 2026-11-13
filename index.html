@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Space Shooter</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #05060f;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Courier New", monospace;
+  }
+  #game {
+    background: #05060f;
+    box-shadow: 0 0 40px rgba(80, 120, 255, .25);
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="800" height="600"></canvas>
+<script>
+"use strict";
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+const MONO = "'Courier New', monospace";
+
+// ---------- input ----------
+const keys = {};
+window.addEventListener("keydown", (e) => {
+  if (["ArrowLeft", "ArrowRight", " ", "Spacebar"].includes(e.key)) e.preventDefault();
+  keys[e.key] = true;
+  if (e.key === "Enter") startOrRestart();
+});
+window.addEventListener("keyup", (e) => { keys[e.key] = false; });
+window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; });
+
+// ---------- alien pixel art (11x8, two animation frames) ----------
+const ALIEN_FRAMES = [
+  [
+    "..X.....X..",
+    "...X...X...",
+    "..XXXXXXX..",
+    ".XX.XXX.XX.",
+    "XXXXXXXXXXX",
+    "X.XXXXXXX.X",
+    "X.X.....X.X",
+    "...XX.XX...",
+  ],
+  [
+    "..X.....X..",
+    "X..X...X..X",
+    "X.XXXXXXX.X",
+    "XXX.XXX.XXX",
+    "XXXXXXXXXXX",
+    ".XXXXXXXXX.",
+    "..X.....X..",
+    ".X.......X.",
+  ],
+];
+const ALIEN_COLORS = ["#7cf67c", "#5fd7ff", "#ffd166", "#ff6b81"];
+const PIXEL = 2;
+const ALIEN_W = 11 * PIXEL;
+const ALIEN_H = 8 * PIXEL;
+const ROWS = 4;
+
+// ---------- starfield ----------
+const stars = [];
+for (let i = 0; i < 90; i++) {
+  stars.push({
+    x: Math.random() * W,
+    y: Math.random() * H,
+    r: Math.random() * 1.5 + 0.5,
+    s: Math.random() * 30 + 10,
+  });
+}
+
+// ---------- game state ----------
+let state = "start"; // "start" | "playing" | "gameover"
+let score, lives, wave;
+let ship, playerBullets, alienBullets, aliens, particles;
+let alienDir, alienShotTimer, invulnTimer, animTime;
+
+function spawnWave() {
+  aliens = [];
+  const COLS = 10, GAP_X = 52, GAP_Y = 40;
+  const startX = (W - (COLS - 1) * GAP_X) / 2;
+  const startY = 50 + Math.min(wave - 1, 5) * 16;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      aliens.push({
+        x: startX + c * GAP_X - ALIEN_W / 2,
+        y: startY + r * GAP_Y,
+        row: r,
+        alive: true,
+      });
+    }
+  }
+  alienDir = 1;
+  alienShotTimer = 1.2;
+}
+
+function resetGame() {
+  score = 0;
+  lives = 3;
+  wave = 1;
+  ship = { x: W / 2, y: H - 34, w: 40, h: 24, speed: 340, cooldown: 0 };
+  playerBullets = [];
+  alienBullets = [];
+  particles = [];
+  invulnTimer = 0;
+  animTime = 0;
+  spawnWave();
+}
+
+function startOrRestart() {
+  if (state === "start" || state === "gameover") {
+    resetGame();
+    state = "playing";
+  }
+}
+resetGame(); // show a scene behind the start overlay
+
+function aliveAliens() { return aliens.filter((a) => a.alive); }
+
+// formation speeds up as it thins out and as waves progress
+function alienSpeed() {
+  return 45 + (wave - 1) * 12 + (ROWS * 10 - aliveAliens().length) * 2.2;
+}
+
+function dropAliens() {
+  const drop = 16 + wave * 2;
+  for (const a of aliens) if (a.alive) a.y += drop;
+}
+
+function explode(x, y, color) {
+  for (let i = 0; i < 14; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const sp = 40 + Math.random() * 140;
+    particles.push({
+      x, y,
+      vx: Math.cos(ang) * sp,
+      vy: Math.sin(ang) * sp,
+      life: 0.5 + Math.random() * 0.4,
+      color,
+    });
+  }
+}
+
+function loseLife(reachedBottom) {
+  lives--;
+  explode(ship.x, ship.y, "#7cf6ff");
+  if (lives <= 0) {
+    state = "gameover";
+    return;
+  }
+  ship.x = W / 2;
+  alienBullets = [];
+  if (reachedBottom) spawnWave();
+  invulnTimer = 2;
+}
+
+// ---------- update ----------
+function update(dt) {
+  animTime += dt;
+
+  for (const s of stars) {
+    s.y += s.s * dt;
+    if (s.y > H) { s.y = -2; s.x = Math.random() * W; }
+  }
+  for (const p of particles) {
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+  }
+  particles = particles.filter((p) => p.life > 0);
+
+  if (state !== "playing") return;
+
+  // ship movement + firing
+  if (keys["ArrowLeft"]) ship.x -= ship.speed * dt;
+  if (keys["ArrowRight"]) ship.x += ship.speed * dt;
+  ship.x = Math.max(ship.w / 2, Math.min(W - ship.w / 2, ship.x));
+  ship.cooldown -= dt;
+  if ((keys[" "] || keys["Spacebar"]) && ship.cooldown <= 0 && playerBullets.length < 5) {
+    playerBullets.push({ x: ship.x, y: ship.y - 18, vy: -480 });
+    ship.cooldown = 0.32;
+  }
+  if (invulnTimer > 0) invulnTimer -= dt;
+
+  for (const b of playerBullets) b.y += b.vy * dt;
+  playerBullets = playerBullets.filter((b) => b.y > -10);
+
+  // alien formation marches sideways, drops when it hits an edge
+  const vx = alienSpeed() * alienDir;
+  let minX = Infinity, maxX = -Infinity;
+  for (const a of aliens) {
+    if (!a.alive) continue;
+    a.x += vx * dt;
+    if (a.x < minX) minX = a.x;
+    if (a.x + ALIEN_W > maxX) maxX = a.x + ALIEN_W;
+  }
+  if (maxX > W - 8 && alienDir > 0) { alienDir = -1; dropAliens(); }
+  else if (minX < 8 && alienDir < 0) { alienDir = 1; dropAliens(); }
+
+  // aliens reaching the ship's row costs a life
+  for (const a of aliens) {
+    if (a.alive && a.y + ALIEN_H >= ship.y - 8) { loseLife(true); return; }
+  }
+
+  // aliens shoot back (faster on later waves)
+  alienShotTimer -= dt;
+  if (alienShotTimer <= 0) {
+    const alive = aliveAliens();
+    if (alive.length > 0) {
+      const shooter = alive[Math.floor(Math.random() * alive.length)];
+      alienBullets.push({
+        x: shooter.x + ALIEN_W / 2,
+        y: shooter.y + ALIEN_H,
+        vy: 200 + wave * 12,
+      });
+    }
+    alienShotTimer = (0.5 + Math.random() * 1.2) / (1 + (wave - 1) * 0.15);
+  }
+  for (const b of alienBullets) b.y += b.vy * dt;
+  alienBullets = alienBullets.filter((b) => b.y < H + 10);
+
+  // player bullets vs aliens (top rows worth more)
+  for (const b of playerBullets) {
+    for (const a of aliens) {
+      if (!a.alive) continue;
+      if (b.x > a.x && b.x < a.x + ALIEN_W && b.y > a.y && b.y < a.y + ALIEN_H) {
+        a.alive = false;
+        b.dead = true;
+        score += (ROWS - a.row) * 10;
+        explode(a.x + ALIEN_W / 2, a.y + ALIEN_H / 2, ALIEN_COLORS[a.row]);
+        break;
+      }
+    }
+  }
+  playerBullets = playerBullets.filter((b) => !b.dead);
+
+  if (aliveAliens().length === 0) {
+    wave++;
+    spawnWave();
+  }
+
+  // alien bullets vs ship
+  if (invulnTimer <= 0) {
+    for (const b of alienBullets) {
+      if (Math.abs(b.x - ship.x) < ship.w / 2 && Math.abs(b.y - ship.y) < ship.h / 2 + 4) {
+        b.dead = true;
+        loseLife(false);
+        break;
+      }
+    }
+    alienBullets = alienBullets.filter((b) => !b.dead);
+  }
+}
+
+// ---------- drawing ----------
+function drawAlien(a) {
+  const frame = ALIEN_FRAMES[Math.floor(animTime * 4) % 2];
+  ctx.fillStyle = ALIEN_COLORS[a.row];
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 11; c++) {
+      if (frame[r][c] === "X") {
+        ctx.fillRect(a.x + c * PIXEL, a.y + r * PIXEL, PIXEL, PIXEL);
+      }
+    }
+  }
+}
+
+function drawShip() {
+  if (invulnTimer > 0 && Math.floor(animTime * 12) % 2 === 0) return; // blink while invulnerable
+  const { x, y } = ship;
+  ctx.fillStyle = "#ff9f43";
+  ctx.fillRect(x - 4, y + 10, 8, 4 + Math.floor(Math.random() * 2) * 3); // engine flame
+  ctx.fillStyle = "#7cf6ff";
+  ctx.beginPath();
+  ctx.moveTo(x, y - 14);
+  ctx.lineTo(x + 7, y + 2);
+  ctx.lineTo(x + 20, y + 10);
+  ctx.lineTo(x - 20, y + 10);
+  ctx.lineTo(x - 7, y + 2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x - 2, y - 6, 4, 6); // cockpit
+}
+
+function drawMiniShip(x, y) {
+  ctx.fillStyle = "#7cf6ff";
+  ctx.beginPath();
+  ctx.moveTo(x, y - 7);
+  ctx.lineTo(x - 7, y + 7);
+  ctx.lineTo(x + 7, y + 7);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawHud() {
+  ctx.fillStyle = "#e8f2ff";
+  ctx.font = "bold 18px " + MONO;
+  ctx.textAlign = "left";
+  ctx.fillText("SCORE  " + String(score).padStart(5, "0"), 18, 28);
+  ctx.textAlign = "center";
+  ctx.fillText("WAVE " + wave, W / 2, 28);
+  ctx.textAlign = "right";
+  ctx.fillText("LIVES", W - 118, 28);
+  for (let i = 0; i < lives; i++) drawMiniShip(W - 92 + i * 26, 22);
+}
+
+function drawOverlay(title, lines) {
+  ctx.fillStyle = "rgba(5, 6, 15, 0.78)";
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#7cf67c";
+  ctx.font = "bold 46px " + MONO;
+  ctx.fillText(title, W / 2, H / 2 - 70);
+  ctx.fillStyle = "#cfe3ff";
+  ctx.font = "18px " + MONO;
+  lines.forEach((line, i) => ctx.fillText(line, W / 2, H / 2 - 20 + i * 30));
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  ctx.fillStyle = "#9db8ff";
+  for (const s of stars) ctx.fillRect(s.x, s.y, s.r, s.r);
+
+  for (const a of aliens) if (a.alive) drawAlien(a);
+  drawShip();
+
+  ctx.fillStyle = "#9be7ff";
+  for (const b of playerBullets) ctx.fillRect(b.x - 1.5, b.y - 8, 3, 10);
+  ctx.fillStyle = "#ff6b81";
+  for (const b of alienBullets) ctx.fillRect(b.x - 1.5, b.y - 6, 3, 9);
+
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(Math.min(p.life / 0.9, 1), 0);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+
+  drawHud();
+
+  if (state === "start") {
+    drawOverlay("SPACE SHOOTER", [
+      "Arrow keys: move    Space: fire",
+      "Blow up the aliens before they reach you.",
+      "",
+      "Press ENTER to start",
+    ]);
+  } else if (state === "gameover") {
+    drawOverlay("GAME OVER", [
+      "FINAL SCORE  " + String(score).padStart(5, "0"),
+      "You reached wave " + wave + ".",
+      "",
+      "Press ENTER to play again",
+    ]);
+  }
+}
+
+// ---------- main loop ----------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.033);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
